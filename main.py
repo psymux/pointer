@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 import argparse
+import collections
 import math
+import pathlib
 import sys
 from urllib.parse import quote_plus
-
-import collections
-import pathlib
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -15,10 +14,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import requests
 from skyfield.api import EarthSatellite, load, wgs84
-from skyfield.framelib import itrs
 
 
-EARTH_RADIUS_KM = 6371.0
 TEXTURE_URL = "https://svs.gsfc.nasa.gov/vis/a000000/a003100/a003191/frames/2048x1024/background-bluemarble.png"
 
 
@@ -44,58 +41,6 @@ def fetch_tle(name=None, catnr=None, timeout=10):
     return lines[0], lines[1], lines[2]
 
 
-def _smooth_noise(shape, scales=(6, 12, 24), seed=2):
-    h, w = shape
-    rng = np.random.default_rng(seed)
-    noise = np.zeros((h, w), dtype=float)
-    for scale in scales:
-        scale = max(1, int(scale))
-        gh = max(1, math.ceil(h / scale))
-        gw = max(1, math.ceil(w / scale))
-        grid = rng.random((gh, gw))
-        up = np.repeat(np.repeat(grid, scale, axis=0), scale, axis=1)
-        noise += up[:h, :w]
-    noise /= len(scales)
-
-    kernel = np.array([1, 4, 6, 4, 1], dtype=float)
-    kernel /= kernel.sum()
-    noise = np.apply_along_axis(lambda m: np.convolve(m, kernel, mode="same"), 0, noise)
-    noise = np.apply_along_axis(lambda m: np.convolve(m, kernel, mode="same"), 1, noise)
-    return noise
-
-
-def _earth_colors(lon, lat):
-    shape = lon.shape
-    noise = _smooth_noise(shape, seed=3)
-    desert = _smooth_noise(shape, seed=7)
-
-    ocean = np.array([0.05, 0.14, 0.32])
-    shallow = np.array([0.08, 0.22, 0.45])
-    land = np.array([0.08, 0.35, 0.12])
-    desert_color = np.array([0.55, 0.45, 0.25])
-    ice = np.array([0.9, 0.93, 0.95])
-
-    colors = np.zeros((*shape, 3), dtype=float)
-    colors[:] = ocean
-
-    land_mask = noise > 0.53
-    shallow_mask = (noise > 0.48) & ~land_mask
-    colors[shallow_mask] = shallow
-    colors[land_mask] = land
-
-    desert_mask = land_mask & (desert > 0.58) & (np.abs(lat) < math.radians(35))
-    colors[desert_mask] = desert_color
-
-    ice_mask = np.abs(lat) > math.radians(70)
-    colors[ice_mask] = ice
-
-    clouds = _smooth_noise(shape, seed=11)
-    cloud_mask = clouds > 0.76
-    colors[cloud_mask] = colors[cloud_mask] * 0.7 + np.array([1.0, 1.0, 1.0]) * 0.3
-
-    return colors
-
-
 def ensure_texture(texture_path, url=TEXTURE_URL, timeout=20):
     texture_path = pathlib.Path(texture_path)
     if texture_path.exists():
@@ -117,80 +62,30 @@ def load_texture(texture_path):
     return img
 
 
-def _texture_colors(img, lon, lat):
-    h, w = img.shape[:2]
-    u = (lon / (2 * math.pi)) % 1.0
-    v = 0.5 - (lat / math.pi)
-    i = np.clip((v * (h - 1)).astype(int), 0, h - 1)
-    j = np.clip((u * (w - 1)).astype(int), 0, w - 1)
-    return img[i, j]
+def wrap_lon(lon):
+    return ((lon + 180) % 360) - 180
 
 
-def build_earth(ax, texture_img=None):
-    u = np.linspace(0, 2 * math.pi, 160)
-    v = np.linspace(0, math.pi, 80)
-    lon, colat = np.meshgrid(u, v, indexing="ij")
-    lat = (math.pi / 2) - colat
-
-    x = EARTH_RADIUS_KM * np.cos(lon) * np.sin(colat)
-    y = EARTH_RADIUS_KM * np.sin(lon) * np.sin(colat)
-    z = EARTH_RADIUS_KM * np.cos(colat)
-
-    if texture_img is not None:
-        colors = _texture_colors(texture_img, lon, lat)
-    else:
-        colors = _earth_colors(lon, lat)
-
-    light_dir = np.array([1.0, 0.2, 0.1])
-    light_dir /= np.linalg.norm(light_dir)
-    normals = np.stack((x, y, z), axis=-1) / EARTH_RADIUS_KM
-    shade = np.clip(np.tensordot(normals, light_dir, axes=([2], [0])), 0, 1)
-    shade = 0.25 + 0.75 * shade
-    colors = colors * shade[..., None]
-
-    ax.plot_surface(
-        x,
-        y,
-        z,
-        rstride=1,
-        cstride=1,
-        facecolors=colors,
-        linewidth=0,
-        antialiased=False,
-        shade=False,
-    )
-
-    # Atmospheric glow
-    glow_r = EARTH_RADIUS_KM * 1.02
-    ax.plot_surface(
-        x * (glow_r / EARTH_RADIUS_KM),
-        y * (glow_r / EARTH_RADIUS_KM),
-        z * (glow_r / EARTH_RADIUS_KM),
-        rstride=2,
-        cstride=2,
-        color="#6ec6ff",
-        alpha=0.08,
-        linewidth=0,
-        shade=False,
-    )
-
-
-def set_axes_equal(ax, extent_km):
-    ax.set_xlim(-extent_km, extent_km)
-    ax.set_ylim(-extent_km, extent_km)
-    ax.set_zlim(-extent_km, extent_km)
-    ax.set_box_aspect([1, 1, 1])
+def trail_with_gaps(lons, lats, jump_threshold=180.0):
+    if len(lons) < 2:
+        return lons, lats
+    out_lons = [lons[0]]
+    out_lats = [lats[0]]
+    for prev_lon, lon, lat in zip(lons[:-1], lons[1:], lats[1:]):
+        if abs(lon - prev_lon) > jump_threshold:
+            out_lons.append(np.nan)
+            out_lats.append(np.nan)
+        out_lons.append(lon)
+        out_lats.append(lat)
+    return out_lons, out_lats
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize a spacecraft from TLE.")
+    parser = argparse.ArgumentParser(description="Visualize a spacecraft from TLE (2D map).")
     parser.add_argument("--name", default="ISS (ZARYA)", help="Spacecraft name for TLE lookup.")
     parser.add_argument("--catnr", help="NORAD catalog number.")
     parser.add_argument("--update-seconds", type=float, default=1.0, help="Visualization update interval.")
-    parser.add_argument("--extent-km", type=float, default=20000, help="Plot extent from Earth center.")
-    parser.add_argument("--trail-minutes", type=float, default=45.0, help="Minutes of trail history to render.")
-    parser.add_argument("--future-minutes", type=float, default=90.0, help="Minutes of future orbit to render.")
-    parser.add_argument("--future-points", type=int, default=120, help="Number of samples for future orbit.")
+    parser.add_argument("--trail-minutes", type=float, default=60.0, help="Minutes of trail history to render.")
     parser.add_argument(
         "--earth-texture",
         default="assets/earth_2048.jpg",
@@ -207,8 +102,8 @@ def main():
     ts = load.timescale()
     sat = EarthSatellite(tle1, tle2, tle0, ts)
 
-    fig = plt.figure(figsize=(7.5, 7.5))
-    ax = fig.add_subplot(111, projection="3d")
+    fig = plt.figure(figsize=(9, 4.5))
+    ax = fig.add_subplot(111)
     ax.set_facecolor("#000000")
     fig.patch.set_facecolor("#000000")
 
@@ -220,55 +115,52 @@ def main():
         print(f"Warning: failed to load Earth texture: {exc}", file=sys.stderr)
         texture_img = None
 
-    build_earth(ax, texture_img=texture_img)
-    set_axes_equal(ax, args.extent_km)
-    ax.set_axis_off()
+    if texture_img is not None:
+        ax.imshow(
+            texture_img,
+            extent=(-180, 180, 90, -90),
+            origin="upper",
+        )
+    else:
+        ax.set_xlim(-180, 180)
+        ax.set_ylim(-90, 90)
 
-    sat_scatter = ax.scatter([], [], [], color="#ff6b6b", s=25)
-    sat_line, = ax.plot([0, 0], [0, 0], [0, 0], color="#ff6b6b", linewidth=1)
-    trail_line, = ax.plot([], [], [], color="#ffa36c", linewidth=1.2, alpha=0.75)
-    future_line, = ax.plot([], [], [], color="#6ee7ff", linewidth=1.0, alpha=0.7)
+    ax.set_xlim(-180, 180)
+    ax.set_ylim(-90, 90)
+    ax.set_xlabel("Longitude (deg)")
+    ax.set_ylabel("Latitude (deg)")
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_color("white")
+
+    sat_scatter = ax.scatter([], [], color="#ff4d4d", s=30, zorder=4)
+    trail_line, = ax.plot([], [], color="#ffa36c", linewidth=1.4, alpha=0.85, zorder=3)
 
     trail_len = max(5, int(args.trail_minutes * 60 / args.update_seconds))
     trail = collections.deque(maxlen=trail_len)
-    frame_counter = 0
 
     def update(_frame):
-        nonlocal frame_counter
         t = ts.now()
         geocentric = sat.at(t)
-        x, y, z = geocentric.frame_xyz(itrs).km
-
-        sat_scatter._offsets3d = ([x], [y], [z])
-        sat_line.set_data([0, x], [0, y])
-        sat_line.set_3d_properties([0, z])
-
-        trail.append((x, y, z))
-        if len(trail) > 2:
-            tx, ty, tz = zip(*trail)
-            trail_line.set_data(tx, ty)
-            trail_line.set_3d_properties(tz)
-
-        if frame_counter % 10 == 0:
-            future_seconds = np.linspace(0, args.future_minutes * 60, args.future_points)
-            future_times = t + future_seconds / 86400.0
-            future_geo = sat.at(future_times)
-            fx, fy, fz = future_geo.frame_xyz(itrs).km
-            future_line.set_data(fx, fy)
-            future_line.set_3d_properties(fz)
-
-        frame_counter += 1
-
         subpoint = wgs84.subpoint(geocentric)
+        lat = subpoint.latitude.degrees
+        lon = wrap_lon(subpoint.longitude.degrees)
+
+        sat_scatter.set_offsets([[lon, lat]])
+        trail.append((lon, lat))
+        if len(trail) > 2:
+            lons, lats = zip(*trail)
+            lons, lats = trail_with_gaps(list(lons), list(lats))
+            trail_line.set_data(lons, lats)
+
         title = (
             f"{sat.name}  "
-            f"lat {subpoint.latitude.degrees:+.2f}°  "
-            f"lon {subpoint.longitude.degrees:+.2f}°  "
+            f"lat {lat:+.2f}°  "
+            f"lon {lon:+.2f}°  "
             f"alt {subpoint.elevation.km:.1f} km"
         )
         ax.set_title(title, color="white")
-        ax.view_init(elev=20, azim=(frame_counter * 0.25) % 360)
-        return sat_scatter, sat_line, trail_line, future_line
+        return sat_scatter, trail_line
 
     anim = animation.FuncAnimation(
         fig,
