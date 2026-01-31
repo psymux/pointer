@@ -5,10 +5,12 @@ import sys
 from urllib.parse import quote_plus
 
 import collections
+import pathlib
 
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.animation as animation
+import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
 import requests
@@ -17,6 +19,7 @@ from skyfield.framelib import itrs
 
 
 EARTH_RADIUS_KM = 6371.0
+TEXTURE_URL = "https://upload.wikimedia.org/wikipedia/commons/c/cd/Land_ocean_ice_2048.jpg"
 
 
 def fetch_tle(name=None, catnr=None, timeout=10):
@@ -93,7 +96,36 @@ def _earth_colors(lon, lat):
     return colors
 
 
-def build_earth(ax):
+def ensure_texture(texture_path, url=TEXTURE_URL, timeout=20):
+    texture_path = pathlib.Path(texture_path)
+    if texture_path.exists():
+        return texture_path
+    texture_path.parent.mkdir(parents=True, exist_ok=True)
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    texture_path.write_bytes(resp.content)
+    return texture_path
+
+
+def load_texture(texture_path):
+    img = mpimg.imread(texture_path)
+    if img.dtype != np.float32 and img.dtype != np.float64:
+        img = img.astype(np.float32) / 255.0
+    if img.shape[-1] == 4:
+        img = img[:, :, :3]
+    return img
+
+
+def _texture_colors(img, lon, lat):
+    h, w = img.shape[:2]
+    u = (lon / (2 * math.pi)) % 1.0
+    v = 0.5 - (lat / math.pi)
+    i = np.clip((v * (h - 1)).astype(int), 0, h - 1)
+    j = np.clip((u * (w - 1)).astype(int), 0, w - 1)
+    return img[i, j]
+
+
+def build_earth(ax, texture_img=None):
     u = np.linspace(0, 2 * math.pi, 160)
     v = np.linspace(0, math.pi, 80)
     lon, colat = np.meshgrid(u, v, indexing="ij")
@@ -103,7 +135,10 @@ def build_earth(ax):
     y = EARTH_RADIUS_KM * np.sin(lon) * np.sin(colat)
     z = EARTH_RADIUS_KM * np.cos(colat)
 
-    colors = _earth_colors(lon, lat)
+    if texture_img is not None:
+        colors = _texture_colors(texture_img, lon, lat)
+    else:
+        colors = _earth_colors(lon, lat)
 
     light_dir = np.array([1.0, 0.2, 0.1])
     light_dir /= np.linalg.norm(light_dir)
@@ -155,6 +190,11 @@ def main():
     parser.add_argument("--trail-minutes", type=float, default=45.0, help="Minutes of trail history to render.")
     parser.add_argument("--future-minutes", type=float, default=90.0, help="Minutes of future orbit to render.")
     parser.add_argument("--future-points", type=int, default=120, help="Number of samples for future orbit.")
+    parser.add_argument(
+        "--earth-texture",
+        default="assets/earth_2048.jpg",
+        help="Path to an equirectangular Earth texture (will download if missing).",
+    )
     args = parser.parse_args()
 
     try:
@@ -168,22 +208,20 @@ def main():
 
     fig = plt.figure(figsize=(7.5, 7.5))
     ax = fig.add_subplot(111, projection="3d")
-    ax.set_facecolor("#0b1020")
-    fig.patch.set_facecolor("#0b1020")
-    build_earth(ax)
+    ax.set_facecolor("#000000")
+    fig.patch.set_facecolor("#000000")
+
+    texture_img = None
+    try:
+        texture_path = ensure_texture(args.earth_texture)
+        texture_img = load_texture(texture_path)
+    except Exception as exc:
+        print(f"Warning: failed to load Earth texture: {exc}", file=sys.stderr)
+        texture_img = None
+
+    build_earth(ax, texture_img=texture_img)
     set_axes_equal(ax, args.extent_km)
     ax.set_axis_off()
-
-    # Starfield backdrop
-    rng = np.random.default_rng(42)
-    star_count = 900
-    star_r = args.extent_km * 1.35
-    theta = rng.random(star_count) * 2 * math.pi
-    phi = np.arccos(1 - 2 * rng.random(star_count))
-    sx = star_r * np.sin(phi) * np.cos(theta)
-    sy = star_r * np.sin(phi) * np.sin(theta)
-    sz = star_r * np.cos(phi)
-    ax.scatter(sx, sy, sz, s=rng.random(star_count) * 4 + 1, color="#d7e3ff", alpha=0.7)
 
     sat_scatter = ax.scatter([], [], [], color="#ff6b6b", s=25)
     sat_line, = ax.plot([0, 0], [0, 0], [0, 0], color="#ff6b6b", linewidth=1)
