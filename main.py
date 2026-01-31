@@ -46,8 +46,9 @@ def _smooth_noise(shape, scales=(6, 12, 24), seed=2):
     rng = np.random.default_rng(seed)
     noise = np.zeros((h, w), dtype=float)
     for scale in scales:
-        gh = max(1, h // scale)
-        gw = max(1, w // scale)
+        scale = max(1, int(scale))
+        gh = max(1, math.ceil(h / scale))
+        gw = max(1, math.ceil(w / scale))
         grid = rng.random((gh, gw))
         up = np.repeat(np.repeat(grid, scale, axis=0), scale, axis=1)
         noise += up[:h, :w]
