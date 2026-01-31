@@ -19,7 +19,7 @@ from skyfield.framelib import itrs
 
 
 EARTH_RADIUS_KM = 6371.0
-TEXTURE_URL = "https://upload.wikimedia.org/wikipedia/commons/c/cd/Land_ocean_ice_2048.jpg"
+TEXTURE_URL = "https://svs.gsfc.nasa.gov/vis/a000000/a003100/a003191/frames/2048x1024/background-bluemarble.png"
 
 
 def fetch_tle(name=None, catnr=None, timeout=10):
@@ -101,7 +101,8 @@ def ensure_texture(texture_path, url=TEXTURE_URL, timeout=20):
     if texture_path.exists():
         return texture_path
     texture_path.parent.mkdir(parents=True, exist_ok=True)
-    resp = requests.get(url, timeout=timeout)
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux aarch64)"}
+    resp = requests.get(url, timeout=timeout, headers=headers)
     resp.raise_for_status()
     texture_path.write_bytes(resp.content)
     return texture_path
