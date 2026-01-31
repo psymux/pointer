@@ -118,8 +118,8 @@ def main():
     if texture_img is not None:
         ax.imshow(
             texture_img,
-            extent=(-180, 180, 90, -90),
-            origin="upper",
+            extent=(-180, 180, -90, 90),
+            origin="lower",
         )
     else:
         ax.set_xlim(-180, 180)
