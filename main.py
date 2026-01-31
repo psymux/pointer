@@ -116,6 +116,7 @@ def main():
         texture_img = None
 
     if texture_img is not None:
+        texture_img = np.flipud(texture_img)
         ax.imshow(
             texture_img,
             extent=(-180, 180, -90, 90),
