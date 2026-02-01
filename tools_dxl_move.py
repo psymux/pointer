@@ -36,11 +36,19 @@ def main():
         print(f"Failed to set baud {args.baud}", file=sys.stderr)
         return 1
 
-    dxl_comm_result, dxl_error = packet_handler.write1ByteTxRx(
-        port_handler, args.id, ADDR_OPERATING_MODE, OPERATING_MODE_POSITION
+    torque_state, dxl_comm_result, dxl_error = packet_handler.read1ByteTxRx(
+        port_handler, args.id, ADDR_TORQUE_ENABLE
     )
     if dxl_comm_result != 0 or dxl_error != 0:
-        print("Failed to set operating mode.")
+        print("Warning: failed to read torque state.")
+        torque_state = TORQUE_ENABLE
+
+    if torque_state == TORQUE_DISABLE:
+        dxl_comm_result, dxl_error = packet_handler.write1ByteTxRx(
+            port_handler, args.id, ADDR_OPERATING_MODE, OPERATING_MODE_POSITION
+        )
+        if dxl_comm_result != 0 or dxl_error != 0:
+            print("Failed to set operating mode.")
 
     dxl_comm_result, dxl_error = packet_handler.write1ByteTxRx(
         port_handler, args.id, ADDR_TORQUE_ENABLE, TORQUE_ENABLE
