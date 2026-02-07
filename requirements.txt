@@ -2,3 +2,5 @@ matplotlib
 numpy
 requests
 skyfield
+dynamixel-sdk
+pyserial
