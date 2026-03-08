@@ -155,6 +155,7 @@ def default_pointer_config():
             "base_id": 2,
             "alt_id": 3,
             "ticks_per_rev": 4096.0,
+            "base_extended_position": False,
             "base_dir": 1,
             "alt_dir": 1,
             "az_min_deg": 0.0,
@@ -237,6 +238,7 @@ class DxlPointerController:
         base_id,
         alt_id,
         ticks_per_rev,
+        base_extended_position,
         base_dir,
         alt_dir,
         az_min_deg,
@@ -255,6 +257,7 @@ class DxlPointerController:
         self.base_id = int(base_id)
         self.alt_id = int(alt_id)
         self.ticks_per_deg = float(ticks_per_rev) / 360.0
+        self.base_extended_position = bool(base_extended_position)
         self.base_dir = int(base_dir)
         self.alt_dir = int(alt_dir)
         self.az_min_deg = float(az_min_deg)
@@ -279,7 +282,12 @@ class DxlPointerController:
         if not self.port_handler.setBaudRate(self.baud):
             raise RuntimeError(f"Failed to set baud {self.baud}")
 
-        self._set_mode(self.base_id, OPERATING_MODE_POSITION)
+        base_mode = (
+            OPERATING_MODE_EXTENDED_POSITION
+            if self.base_extended_position
+            else OPERATING_MODE_POSITION
+        )
+        self._set_mode(self.base_id, base_mode)
         self._set_mode(self.alt_id, OPERATING_MODE_EXTENDED_POSITION)
 
     def close(self):
@@ -324,7 +332,7 @@ class DxlPointerController:
         self._write1(self.alt_id, ADDR_TORQUE_ENABLE, torque_value)
 
     def read_present_positions(self):
-        base_pos = self._read4(self.base_id, ADDR_PRESENT_POSITION, signed=False)
+        base_pos = self._read4(self.base_id, ADDR_PRESENT_POSITION, signed=self.base_extended_position)
         alt_pos = self._read4(self.alt_id, ADDR_PRESENT_POSITION, signed=True)
         return base_pos, alt_pos
 
@@ -338,11 +346,52 @@ class DxlPointerController:
         if self.base_reference_ticks is None or self.alt_reference_ticks is None:
             raise RuntimeError("Missing reference ticks; run --set-reference first.")
 
-        az_raw = normalize_degrees_360(float(az_deg) + self.az_offset_deg)
-        az_cmd_deg, az_clamped = clamp_azimuth(az_raw, self.az_min_deg, self.az_max_deg)
-        az_delta_deg = wrap_degrees_180(az_cmd_deg - self.base_reference_az_deg)
-        base_goal = int(round(self.base_reference_ticks + self.base_dir * az_delta_deg * self.ticks_per_deg))
-        base_goal = int(clamp(base_goal, 0, 4095))
+        az_raw = float(az_deg) + self.az_offset_deg
+        if self.base_extended_position:
+            current_base_ticks = self._read4(self.base_id, ADDR_PRESENT_POSITION, signed=True)
+            current_base_deg = self.base_reference_az_deg + (
+                (current_base_ticks - self.base_reference_ticks)
+                / (self.base_dir * self.ticks_per_deg)
+            )
+            az_turns = int(round((current_base_deg - az_raw) / 360.0))
+            az_cmd_deg = az_raw + (360.0 * az_turns)
+            az_clamped = False
+            az_wrapped = az_turns != 0
+            base_goal = int(
+                round(
+                    self.base_reference_ticks
+                    + self.base_dir * (az_cmd_deg - self.base_reference_az_deg) * self.ticks_per_deg
+                )
+            )
+        else:
+            az_raw = normalize_degrees_360(az_raw)
+            az_cmd_deg, az_clamped = clamp_azimuth(az_raw, self.az_min_deg, self.az_max_deg)
+            preferred_az_delta_deg = wrap_degrees_180(az_cmd_deg - self.base_reference_az_deg)
+            preferred_base_goal = int(
+                round(
+                    self.base_reference_ticks
+                    + self.base_dir * preferred_az_delta_deg * self.ticks_per_deg
+                )
+            )
+
+            base_goal = None
+            az_wrapped = False
+            for wrap_turns in (0, -1, 1, -2, 2):
+                az_delta_deg = preferred_az_delta_deg + (360.0 * wrap_turns)
+                candidate_base_goal = int(
+                    round(
+                        self.base_reference_ticks
+                        + self.base_dir * az_delta_deg * self.ticks_per_deg
+                    )
+                )
+                if 0 <= candidate_base_goal <= 4095:
+                    base_goal = candidate_base_goal
+                    az_wrapped = wrap_turns != 0
+                    break
+
+            if base_goal is None:
+                base_goal = int(clamp(preferred_base_goal, 0, 4095))
+                az_clamped = True
 
         alt_raw = float(alt_deg) + self.alt_offset_deg
         alt_cmd_deg = clamp(alt_raw, self.alt_min_deg, self.alt_max_deg)
@@ -359,6 +408,7 @@ class DxlPointerController:
             "az_cmd_deg": az_cmd_deg,
             "alt_cmd_deg": alt_cmd_deg,
             "az_clamped": az_clamped,
+            "az_wrapped": az_wrapped,
             "alt_clamped": alt_clamped,
             "base_goal": base_goal,
             "alt_goal": alt_goal,
@@ -373,6 +423,7 @@ def build_pointer_controller(config):
         base_id=servo["base_id"],
         alt_id=servo["alt_id"],
         ticks_per_rev=servo["ticks_per_rev"],
+        base_extended_position=servo.get("base_extended_position", False),
         base_dir=servo["base_dir"],
         alt_dir=servo["alt_dir"],
         az_min_deg=servo["az_min_deg"],
